@@ -50,10 +50,10 @@ def create_atlas(working_dir, resolution):
     utils.check_internet_connection()
 
     destination_path = download_dir_path / "atlas_download.zip"
-    # utils.retrieve_over_http(ATLAS_FILE_URL, destination_path)
-    #
-    # zf = zipfile.ZipFile(destination_path, "r")
-    # zf.extractall(atlas_files_dir)
+    utils.retrieve_over_http(ATLAS_FILE_URL, destination_path)
+
+    zf = zipfile.ZipFile(destination_path, "r")
+    zf.extractall(atlas_files_dir)
 
     template_file = atlas_files_dir / "101010_ds_SW_BC74white_220217_120749_10_10_ch04_chan_4_blue_raw_oriented.nii"
     structures_file = atlas_files_dir / "structures.csv"
@@ -65,7 +65,7 @@ def create_atlas(working_dir, resolution):
     # ---------------------------------------------------------------------------- #
     #                             REFERENCE VOLUME                                 #
     # ---------------------------------------------------------------------------- #
-    native_resolution = 10 #um
+    native_resolution = 10  #um
     scale = native_resolution / resolution
     scaling = (scale, scale, scale)
 
