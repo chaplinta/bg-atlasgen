@@ -208,6 +208,7 @@ def wrapup_atlas_from_data(
     )
 
     # Compress if required:
+    output_filename = None
     if compress:
         output_filename = dest_dir.parent / f"{dest_dir.name}.tar.gz"
         print(f"Saving compressed atlas data at: {output_filename}")

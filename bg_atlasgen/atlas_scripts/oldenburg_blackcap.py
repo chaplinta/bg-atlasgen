@@ -8,7 +8,8 @@ from pathlib import Path
 import zipfile
 import imio
 import pandas as pd
-
+import scipy
+import numpy as np
 from bg_atlasgen.wrapup import wrapup_atlas_from_data
 
 from bg_atlasapi import utils
@@ -33,11 +34,11 @@ def create_atlas(working_dir, resolution):
 
     """
 
-    ATLAS_NAME = "blackcap"
+    ATLAS_NAME = "oldenburg_blackcap"
     SPECIES = "Sylvia atricapilla"
     ATLAS_LINK = ""
-    CITATION = ""
-    ORIENTATION = "asr"
+    CITATION = "unpublished"
+    ORIENTATION = "rai"
     ATLAS_FILE_URL = "https://www.dropbox.com/sh/qxvf1fwxdq96vot/AADRRBaWCef9xct4McwHpwkWa?dl=1"
 
     # Temporary folder for  download:
@@ -54,7 +55,7 @@ def create_atlas(working_dir, resolution):
     # zf = zipfile.ZipFile(destination_path, "r")
     # zf.extractall(atlas_files_dir)
 
-    template_file = atlas_files_dir / "1001010_ds_SW_BC74white_220217_120749_10_10_ch04_chan_4_blue_raw_oriented.nii"
+    template_file = atlas_files_dir / "101010_ds_SW_BC74white_220217_120749_10_10_ch04_chan_4_blue_raw_oriented.nii"
     structures_file = atlas_files_dir / "structures.csv"
     itksnap_label_file = atlas_files_dir / "Label_descriptions_BC74white_KH_12042022.txt"
     annotations_file = atlas_files_dir / "BC74white_100um_annotations_120422.nii"
@@ -64,23 +65,45 @@ def create_atlas(working_dir, resolution):
     # ---------------------------------------------------------------------------- #
     #                             REFERENCE VOLUME                                 #
     # ---------------------------------------------------------------------------- #
-    scaling = (1, 1, 1)
-    template_volume = imio.load_any(
-        template_file,
-        scaling[1],
-        scaling[2],
-        scaling[0],
-    )
+    native_resolution = 10 #um
+    scale = native_resolution / resolution
+    scaling = (scale, scale, scale)
+
+    template_volume = imio.load_any(template_file)
+    # Normalise with clipping to remove noise and fix contrast.
+    template_volume = clean_norm(template_volume, dtype=np.dtype(np.uint16), clean=False)
+    # imio.load_any does not support scaling of nii, so need to do it here.
+    template_volume = scipy.ndimage.zoom(template_volume,
+                                         scaling,
+                                         order=1,
+                                         mode='nearest')
 
     # ---------------------------------------------------------------------------- #
     #                             ANOTATED VOLUME                                  #
     # ---------------------------------------------------------------------------- #
 
-    annotated_volume = None  # volume with structures annotations
+    # Annotation is 100um in AP.
+    annotated_volume_100 = imio.load_any(annotations_file, (1, 1, 1))
+
+    # Resample to required resolution in AP with nearest neighbour so as to not mess up the labels.
+    native_annotated_ap_res = 100  # um
+    annotated_ap_scale = (native_annotated_ap_res / resolution)
+    annotated_volume = scipy.ndimage.zoom(annotated_volume_100,
+                                          (scale, annotated_ap_scale, scale),
+                                          order=0,
+                                          mode='nearest')
 
     # ---------------------------------------------------------------------------- #
     #                             STRUCTURES HIERARCHY                             #
     # ---------------------------------------------------------------------------- #
+
+
+    # Load the ITKSnap description file to get the colours.
+    n_rows_header = 14
+    df_itksnap = pd.read_csv(itksnap_label_file,
+                             delim_whitespace=True,
+                             skiprows=n_rows_header,
+                             names=["IDX", "-R-", "-G-", "-B-", "-A-", "VIS", "MESH-VIS", "LABEL"])
 
     root_id = 1  # id of the root structure
 
@@ -93,21 +116,30 @@ def create_atlas(working_dir, resolution):
             .str.split(pat="/")
             .map(lambda x: [int(i) for i in x[1:-1]])
     )
-    #df["structure_id_path"] = df["structure_id_path"].map(lambda x: x[:-1])
     structures = df.to_dict("records")
-    structures[0000]["structure_id_path"] = root_id
+    #structures[0000]["structure_id_path"] = [root_id]
     for structure in structures:
-        structure.update({"rgb_triplet": [255, 255, 255]})
-        # root doesn't have a parent
-        if structure["id"] != root_id:
+        if structure["id"] == root_id:
+            # root doesn't have a parent or color.
+            structure["structure_id_path"] = [root_id]
+            structure.update({"rgb_triplet": [255, 255, 255]})
+        else:
+            # Structures have a parent and a color.
             structure["structure_id_path"].append(structure["id"])
+            struc_index = df_itksnap["LABEL"] == structure['name']
+            struc_red = int(df_itksnap.loc[struc_index, "-R-"].values[0])
+            struc_blue = int(df_itksnap.loc[struc_index, "-B-"].values[0])
+            struc_green = int(df_itksnap.loc[struc_index, "-G-"].values[0])
+            structure.update({"rgb_triplet": [struc_red, struc_blue, struc_green]})
+
+
 
 
     # ---------------------------------------------------------------------------- #
     #                             MESHES                                           #
     # ---------------------------------------------------------------------------- #
 
-    meshes_dict = None  # dictionary of files with region meshes
+    meshes_dict = {}  # dictionary of files with region meshes
 
     # # Mesh creation
     # closing_n_iters = 2
@@ -187,15 +219,36 @@ def create_atlas(working_dir, resolution):
         additional_references=additional_references,
         hemispheres_stack=None,
         cleanup_files=False,
-        compress=True,
+        compress=False,
     )
 
     return output_filename
 
+def clean_norm(image, dtype, clean=True, clip_prc_lo=0.1, clip_prc_hi=99.9):
+
+    if clean:
+        # Remove low and high clipping pixels.
+        clip_lo = np.percentile(image, clip_prc_lo)
+        clip_hi = np.percentile(image, clip_prc_hi)
+        image[image < clip_lo] = clip_lo
+        image[image > clip_hi] = clip_hi
+
+    image = norm_type(image, dtype)
+
+    return image
+
+def norm_type(vol, dtype):
+    vol_min = np.min(vol)
+    vol_max_ = np.max(vol)
+
+    vol = ((vol - vol_min) / (vol_max_ - vol_min)) \
+          * np.iinfo(dtype).max
+
+    return vol.astype(dtype, copy=False)
 
 # To test stuff locally:
 if __name__ == "__main__":
-    resolution = 10  # some resolution, in microns
+    resolution = 50  # some resolution, in microns
 
     # Generated atlas path:
     bg_root_dir = Path.home() / "brainglobe_workingdir" / "blackcap"
