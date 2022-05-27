@@ -46,19 +46,28 @@ def create_atlas(working_dir, resolution):
     download_dir_path.mkdir(exist_ok=True)
     atlas_files_dir = download_dir_path / "atlas_files"
 
-    # Download atlas_file
-    utils.check_internet_connection()
-
-    destination_path = download_dir_path / "atlas_download.zip"
-    utils.retrieve_over_http(ATLAS_FILE_URL, destination_path)
-
-    zf = zipfile.ZipFile(destination_path, "r")
-    zf.extractall(atlas_files_dir)
+    # # Download atlas_file
+    # utils.check_internet_connection()
+    #
+    # destination_path = download_dir_path / "atlas_download.zip"
+    # utils.retrieve_over_http(ATLAS_FILE_URL, destination_path)
+    #
+    # zf = zipfile.ZipFile(destination_path, "r")
+    # zf.extractall(atlas_files_dir)
 
     template_file = atlas_files_dir / "101010_ds_SW_BC74white_220217_120749_10_10_ch04_chan_4_blue_raw_oriented.nii"
     structures_file = atlas_files_dir / "structures.csv"
-    itksnap_label_file = atlas_files_dir / "Label_descriptions_BC74white_KH_12042022.txt"
-    annotations_file = atlas_files_dir / "BC74white_100um_annotations_120422.nii"
+
+    # Katrin & Isabelle are currently annoating separately so there 2 sets of files.
+    # Katrin also made one for the whole brain. ITSnap can't have overlapping labels so it has be by itself.
+    # But actually can't have overlapping structures.
+    annotations_file_kh = atlas_files_dir / "BC74white_100um_annotations_120422.nii"
+    annotations_file_kh_brain = atlas_files_dir / "BC74white_brain_outline_correction_KH_230522.nii.gz"
+    annotations_file_im = atlas_files_dir / "BC74white_100um_annoations_IM_200522.nii.gz"
+
+    itksnap_label_file_kh = atlas_files_dir / "Label_descriptions_BC74white_KH_12042022.txt"
+    itksnap_label_file_kh_brain = atlas_files_dir / "Label_description_brain_outline_KH_230522.txt"
+    itksnap_label_file_im = atlas_files_dir / "Label_description_BC74white_IM_200522.txt"
 
     # do stuff to create the atlas
 
@@ -71,7 +80,7 @@ def create_atlas(working_dir, resolution):
 
     template_volume = imio.load_any(template_file)
     # Normalise with clipping to remove noise and fix contrast.
-    template_volume = clean_norm(template_volume, dtype=np.dtype(np.uint16), clean=False)
+    template_volume = clean_norm(template_volume, dtype=np.dtype(np.uint16), clean=True)
     # imio.load_any does not support scaling of nii, so need to do it here.
     template_volume = scipy.ndimage.zoom(template_volume,
                                          scaling,
@@ -79,19 +88,45 @@ def create_atlas(working_dir, resolution):
                                          mode='nearest')
 
     # ---------------------------------------------------------------------------- #
-    #                             ANOTATED VOLUME                                  #
+    #                             ANNOTATED VOLUME                                 #
     # ---------------------------------------------------------------------------- #
 
     # Annotation is 100um in AP.
-    annotated_volume_100 = imio.load_any(annotations_file, (1, 1, 1))
+    annotated_volume_100_kh = imio.load_any(annotations_file_kh, (1, 1, 1))
+    annotated_volume_100_kh_brain = imio.load_any(annotations_file_kh_brain, (1, 1, 1))
+    annotated_volume_100_im = imio.load_any(annotations_file_im, (1, 1, 1))
+
+    # Combine KH & IM's annotations (volumes).
+    n_structs_kh = np.sum(np.unique(annotated_volume_100_kh) > 0)
+    n_structs_kh_brain = np.sum(np.unique(annotated_volume_100_kh_brain) > 0)
+    if n_structs_kh_brain > 1:
+        raise Exception("There was more than 1 structure in the outline volume")
+    n_structs_im = np.sum(np.unique(annotated_volume_100_im) > 0)
+    # Offset the outline structure by the number made by Katrin.
+    annotated_volume_100_kh_brain[annotated_volume_100_kh_brain > 0] = annotated_volume_100_kh_brain[annotated_volume_100_kh_brain > 0] + n_structs_kh
+    # Offset all Isabelle's structures by the number made by Katrin, + 1 for outline
+    annotated_volume_100_im[annotated_volume_100_im > 0] = annotated_volume_100_im[annotated_volume_100_im > 0] + n_structs_kh + 1
+
+    # Combine.
+    # There could be some overlap between KH & IM structures. Take KH when this happens.
+    annotated_volume_100_im[annotated_volume_100_kh > 0] = 0
+    annotated_volume_100_comb = annotated_volume_100_kh + annotated_volume_100_im
+    # Combine the whole brain. Just use it to fill in the gaps, because you can't have overlapping structures.
+    annotated_volume_100_kh_brain[annotated_volume_100_comb > 0] = 0
+    annotated_volume_100_comb = annotated_volume_100_comb + annotated_volume_100_kh_brain
 
     # Resample to required resolution in AP with nearest neighbour so as to not mess up the labels.
     native_annotated_ap_res = 100  # um
     annotated_ap_scale = (native_annotated_ap_res / resolution)
-    annotated_volume = scipy.ndimage.zoom(annotated_volume_100,
-                                          (scale, annotated_ap_scale, scale),
-                                          order=0,
-                                          mode='nearest')
+
+    annotated_volume_comb = scipy.ndimage.zoom(annotated_volume_100_comb,
+                                              (scale, annotated_ap_scale, scale),
+                                              order=0,
+                                              mode='nearest')
+
+
+    # Create a new empty annoated volume to be filled out later.
+    annotated_volume = np.full_like(annotated_volume_comb, 0)
 
     # ---------------------------------------------------------------------------- #
     #                             STRUCTURES HIERARCHY                             #
@@ -100,10 +135,44 @@ def create_atlas(working_dir, resolution):
 
     # Load the ITKSnap description file to get the colours.
     n_rows_header = 14
-    df_itksnap = pd.read_csv(itksnap_label_file,
-                             delim_whitespace=True,
-                             skiprows=n_rows_header,
-                             names=["IDX", "-R-", "-G-", "-B-", "-A-", "VIS", "MESH-VIS", "LABEL"])
+    df_itksnap_kh = pd.read_csv(itksnap_label_file_kh,
+                                delim_whitespace=True,
+                                skiprows=n_rows_header,
+                                names=["IDX", "-R-", "-G-", "-B-", "-A-", "VIS", "MESH-VIS", "LABEL"])
+    # Drop first row, it's just an ITKSnap place holder for clear labels.
+    df_itksnap_kh = df_itksnap_kh.iloc[1:, :]
+
+    if n_structs_kh != df_itksnap_kh.shape[0]:
+        raise Exception("The number of KH labels in the volume did not match the number of labels in the descriptions.")
+
+    df_itksnap_kh_brain = pd.read_csv(itksnap_label_file_kh_brain,
+                                        delim_whitespace=True,
+                                        skiprows=n_rows_header,
+                                        names=["IDX", "-R-", "-G-", "-B-", "-A-", "VIS", "MESH-VIS", "LABEL"])
+    # Drop first row, it's just an ITKSnap place holder for clear labels.
+    df_itksnap_kh_brain = df_itksnap_kh_brain.iloc[1:, :]
+
+    df_itksnap_im = pd.read_csv(itksnap_label_file_im,
+                                delim_whitespace=True,
+                                skiprows=n_rows_header,
+                                names=["IDX", "-R-", "-G-", "-B-", "-A-", "VIS", "MESH-VIS", "LABEL"])
+    # Drop first row, it's just an ITKSnap place holder for clear labels.
+    df_itksnap_im = df_itksnap_im.iloc[1:, :]
+
+    if n_structs_im != df_itksnap_im.shape[0]:
+        raise Exception("The number of IM labels in the volume did not match the number of labels in the descriptions.")
+
+    # Offset the outline structure by the number made by Katrin
+    df_itksnap_kh_brain["IDX"] = df_itksnap_kh_brain["IDX"] + n_structs_kh
+    # Offset all Isabelle's structures by the number made by Katrin, + 1 for outline
+    df_itksnap_im["IDX"] = df_itksnap_im["IDX"] + n_structs_kh + 1
+
+    # Combine KH & IM's annotations (ITKSnap files)
+    df_itksnap = pd.concat([df_itksnap_kh, df_itksnap_kh_brain, df_itksnap_im])
+
+    # Make sure there are no duplicates.
+    if np.sum(df_itksnap.duplicated(subset="LABEL")) > 0:
+        raise Exception("There were duplicate labels across KH & IM ITKSnap descriptions")
 
     root_id = 1  # id of the root structure
 
@@ -117,7 +186,6 @@ def create_atlas(working_dir, resolution):
             .map(lambda x: [int(i) for i in x[1:-1]])
     )
     structures = df.to_dict("records")
-    #structures[0000]["structure_id_path"] = [root_id]
     for structure in structures:
         if structure["id"] == root_id:
             # root doesn't have a parent or color.
@@ -131,6 +199,12 @@ def create_atlas(working_dir, resolution):
             struc_blue = int(df_itksnap.loc[struc_index, "-B-"].values[0])
             struc_green = int(df_itksnap.loc[struc_index, "-G-"].values[0])
             structure.update({"rgb_triplet": [struc_red, struc_blue, struc_green]})
+
+            # The label index in ITKSnap does not match the index from structures.
+            # So look up the ITKSnap index and set it the structures index.
+            itksnap_index = int(df_itksnap.loc[struc_index, "IDX"].values[0])
+            annotated_volume[annotated_volume_comb == itksnap_index] = int(structure["id"])
+
 
 
 
@@ -224,7 +298,7 @@ def create_atlas(working_dir, resolution):
 
     return output_filename
 
-def clean_norm(image, dtype, clean=True, clip_prc_lo=0.1, clip_prc_hi=99.9):
+def clean_norm(image, dtype, clean=True, clip_prc_lo=0.3, clip_prc_hi=99.7):
 
     if clean:
         # Remove low and high clipping pixels.
