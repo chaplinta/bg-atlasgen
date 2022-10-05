@@ -46,26 +46,25 @@ def create_atlas(working_dir, resolution):
     download_dir_path.mkdir(exist_ok=True)
     atlas_files_dir = download_dir_path / "atlas_files"
 
-    # # Download atlas_file
-    # utils.check_internet_connection()
-    #
-    # destination_path = download_dir_path / "atlas_download.zip"
-    # utils.retrieve_over_http(ATLAS_FILE_URL, destination_path)
-    #
-    # zf = zipfile.ZipFile(destination_path, "r")
-    # zf.extractall(atlas_files_dir)
+    # Download atlas_file
+    utils.check_internet_connection()
+    destination_path = download_dir_path / "atlas_download.zip"
+    print("Downloading files")
+    utils.retrieve_over_http(ATLAS_FILE_URL, destination_path)
+    zf = zipfile.ZipFile(destination_path, "r")
+    zf.extractall(atlas_files_dir)
 
     template_file = atlas_files_dir / "101010_ds_SW_BC74white_220217_120749_10_10_ch04_chan_4_blue_raw_oriented.nii"
     structures_file = atlas_files_dir / "structures.csv"
 
-    # Katrin & Isabelle are currently annoating separately so there 2 sets of files.
+    # Katrin & Isabelle are currently annotating separately so there 2 sets of files.
     # Katrin also made one for the whole brain. ITSnap can't have overlapping labels so it has be by itself.
     # But actually can't have overlapping structures.
-    annotations_file_kh = atlas_files_dir / "BC74white_100um_annotations_120422.nii"
-    annotations_file_kh_brain = atlas_files_dir / "BC74white_brain_outline_correction_KH_230522.nii.gz"
+    annotations_file_kh = atlas_files_dir / "BC74white_100um_annotations_KH_210722.nii"
+    annotations_file_kh_brain = atlas_files_dir / "BC74white_brain_outline_correction_KH_230522.nii"
     annotations_file_im = atlas_files_dir / "BC74white_100um_annoations_IM_200522.nii.gz"
 
-    itksnap_label_file_kh = atlas_files_dir / "Label_descriptions_BC74white_KH_12042022.txt"
+    itksnap_label_file_kh = atlas_files_dir / "Label_descriptions_BC_brainatlas_KH_21072022.txt"
     itksnap_label_file_kh_brain = atlas_files_dir / "Label_description_brain_outline_KH_230522.txt"
     itksnap_label_file_im = atlas_files_dir / "Label_description_BC74white_IM_200522.txt"
 
@@ -78,10 +77,13 @@ def create_atlas(working_dir, resolution):
     scale = native_resolution / resolution
     scaling = (scale, scale, scale)
 
+    print("Loading template")
     template_volume = imio.load_any(template_file)
     # Normalise with clipping to remove noise and fix contrast.
+    print("Cleaning template")
     template_volume = clean_norm(template_volume, dtype=np.dtype(np.uint16), clean=True)
     # imio.load_any does not support scaling of nii, so need to do it here.
+    print("Scaling template")
     template_volume = scipy.ndimage.zoom(template_volume,
                                          scaling,
                                          order=1,
@@ -92,6 +94,7 @@ def create_atlas(working_dir, resolution):
     # ---------------------------------------------------------------------------- #
 
     # Annotation is 100um in AP.
+    print("Loading annotations")
     annotated_volume_100_kh = imio.load_any(annotations_file_kh, (1, 1, 1))
     annotated_volume_100_kh_brain = imio.load_any(annotations_file_kh_brain, (1, 1, 1))
     annotated_volume_100_im = imio.load_any(annotations_file_im, (1, 1, 1))
@@ -108,6 +111,7 @@ def create_atlas(working_dir, resolution):
     annotated_volume_100_im[annotated_volume_100_im > 0] = annotated_volume_100_im[annotated_volume_100_im > 0] + n_structs_kh + 1
 
     # Combine.
+    print("Combining annotations")
     # There could be some overlap between KH & IM structures. Take KH when this happens.
     annotated_volume_100_im[annotated_volume_100_kh > 0] = 0
     annotated_volume_100_comb = annotated_volume_100_kh + annotated_volume_100_im
@@ -118,7 +122,7 @@ def create_atlas(working_dir, resolution):
     # Resample to required resolution in AP with nearest neighbour so as to not mess up the labels.
     native_annotated_ap_res = 100  # um
     annotated_ap_scale = (native_annotated_ap_res / resolution)
-
+    print("Scaling annotations")
     annotated_volume_comb = scipy.ndimage.zoom(annotated_volume_100_comb,
                                               (scale, annotated_ap_scale, scale),
                                               order=0,
@@ -132,7 +136,7 @@ def create_atlas(working_dir, resolution):
     #                             STRUCTURES HIERARCHY                             #
     # ---------------------------------------------------------------------------- #
 
-
+    print("Loading ITKSnap data")
     # Load the ITKSnap description file to get the colours.
     n_rows_header = 14
     df_itksnap_kh = pd.read_csv(itksnap_label_file_kh,
@@ -194,7 +198,7 @@ def create_atlas(working_dir, resolution):
         else:
             # Structures have a parent and a color.
             structure["structure_id_path"].append(structure["id"])
-            struc_index = df_itksnap["LABEL"] == structure['name']
+            struc_index = df_itksnap["LABEL"] == structure['acronym']
             struc_red = int(df_itksnap.loc[struc_index, "-R-"].values[0])
             struc_blue = int(df_itksnap.loc[struc_index, "-B-"].values[0])
             struc_green = int(df_itksnap.loc[struc_index, "-G-"].values[0])
